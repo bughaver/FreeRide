@@ -474,14 +474,7 @@ def update_model_config(
             # Build new fallbacks list
             new_fallbacks = []
 
-            # Always add openrouter/free as first fallback (smart router)
-            # Skip if it's being set as primary
-            free_router = "openrouter/free"
-            free_router_primary = format_model_for_openclaw("openrouter/free", with_provider_prefix=True)
-            if formatted_primary != free_router_primary and formatted_for_list != free_router:
-                new_fallbacks.append(free_router)
-                config["agents"]["defaults"]["models"][free_router] = {}
-
+            # Add regular model fallbacks first
             for m in free_models:
                 # Reserve one slot for openrouter/free
                 if len(new_fallbacks) >= fallback_count:
@@ -490,7 +483,7 @@ def update_model_config(
                 m_formatted = format_model_for_openclaw(m["id"], with_provider_prefix=False)
                 m_formatted_primary = format_model_for_openclaw(m["id"], with_provider_prefix=True)
 
-                # Skip openrouter/free (already added as first)
+                # Skip openrouter/free (will be added at the end)
                 if "openrouter/free" in m["id"]:
                     continue
 
@@ -506,11 +499,19 @@ def update_model_config(
                 new_fallbacks.append(m_formatted)
                 config["agents"]["defaults"]["models"][m_formatted] = {}
 
-            # If not setting as primary, prepend new model to fallbacks (after openrouter/free)
+            # Then add openrouter/free as last fallback (smart router as catch-all)
+            free_router = "openrouter/free"
+            free_router_primary = format_model_for_openclaw("openrouter/free", with_provider_prefix=True)
+            if formatted_primary != free_router_primary and formatted_for_list != free_router:
+                if free_router not in new_fallbacks:  # Avoid duplicates
+                    new_fallbacks.append(free_router)
+                    config["agents"]["defaults"]["models"][free_router] = {}
+
+            # If not setting as primary, prepend new model to fallbacks (before openrouter/free)
             if not as_primary:
                 if formatted_for_list not in new_fallbacks:
-                    # Insert after openrouter/free if present
-                    insert_pos = 1 if free_router in new_fallbacks else 0
+                    # Insert before openrouter/free (which is last)
+                    insert_pos = len(new_fallbacks) - 1 if free_router in new_fallbacks else len(new_fallbacks)
                     new_fallbacks.insert(insert_pos, formatted_for_list)
                 config["agents"]["defaults"]["models"][formatted_for_list] = {}
 
@@ -847,20 +848,14 @@ def cmd_fallbacks(args):
     # Get fallbacks excluding current model
     fallbacks = []
 
-    # Always add openrouter/free as first fallback (smart router)
-    free_router = "openrouter/free"
-    free_router_primary = format_model_for_openclaw("openrouter/free", with_provider_prefix=True)
-    if not current or current != free_router_primary:
-        fallbacks.append(free_router)
-        config["agents"]["defaults"]["models"][free_router] = {}
-
+    # Add regular model fallbacks first
     for m in models:
         formatted = format_model_for_openclaw(m["id"], with_provider_prefix=False)
         formatted_primary = format_model_for_openclaw(m["id"], with_provider_prefix=True)
 
         if current and (formatted_primary == current):
             continue
-        # Skip openrouter/free (already added as first)
+        # Skip openrouter/free (will be added at the end)
         if "openrouter/free" in m["id"]:
             continue
         if len(fallbacks) >= args.count:
@@ -868,6 +863,14 @@ def cmd_fallbacks(args):
 
         fallbacks.append(formatted)
         config["agents"]["defaults"]["models"][formatted] = {}
+
+    # Then add openrouter/free as last fallback (smart router as catch-all)
+    free_router = "openrouter/free"
+    free_router_primary = format_model_for_openclaw("openrouter/free", with_provider_prefix=True)
+    if not current or current != free_router_primary:
+        if free_router not in fallbacks:  # Avoid duplicates
+            fallbacks.append(free_router)
+            config["agents"]["defaults"]["models"][free_router] = {}
 
     config["agents"]["defaults"]["model"]["fallbacks"] = fallbacks
     save_openclaw_config(config)
