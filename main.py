@@ -23,23 +23,39 @@ except ImportError:
 
 # Constants
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/models"
+ARTIFICIAL_ANALYSIS_API_URL = "https://artificialanalysis.ai/api/v2/data/llms/models"
 OPENCLAW_CONFIG_PATH = Path.home() / ".openclaw" / "openclaw.json"
+FREERIDE_CONFIG_PATH = Path.home() / ".openclaw" / "freeride.json"
 CACHE_FILE = Path.home() / ".openclaw" / ".freeride-cache.json"
+BENCHMARK_CACHE_FILE = Path.home() / ".openclaw" / ".freeride-benchmarks.json"
 CACHE_DURATION_HOURS = 6
+BENCHMARK_CACHE_DURATION_HOURS = 24
 
-# Free model ranking criteria (higher is better)
-RANKING_WEIGHTS = {
-    "context_length": 0.4,      # Prefer longer context
-    "capabilities": 0.3,        # Prefer more capabilities
-    "recency": 0.2,            # Prefer newer models
-    "provider_trust": 0.1       # Prefer trusted providers
+# Default ranking criteria (higher is better)
+DEFAULT_RANKING_WEIGHTS = {
+    "context_length": 0.20,     # Prefer longer context
+    "benchmarks": 0.70,         # Prefer higher benchmark scores
+    "capabilities": 0.10,       # Prefer more capabilities
+    "recency": 0.00,            # Prefer newer models
+    "provider_trust": 0.00      # Prefer trusted providers
 }
 
-# Trusted providers (in order of preference)
-TRUSTED_PROVIDERS = [
-    "google", "meta-llama", "mistralai", "deepseek",
-    "nvidia", "qwen", "microsoft", "allenai", "arcee-ai"
-]
+# Default trusted providers (in order of preference)
+DEFAULT_TRUSTED_PROVIDERS = []
+
+# Load configuration from external file if exists
+RANKING_WEIGHTS = DEFAULT_RANKING_WEIGHTS.copy()
+TRUSTED_PROVIDERS = DEFAULT_TRUSTED_PROVIDERS.copy()
+
+if FREERIDE_CONFIG_PATH.exists():
+    try:
+        config = json.loads(FREERIDE_CONFIG_PATH.read_text())
+        if "ranking_weights" in config:
+            RANKING_WEIGHTS.update(config["ranking_weights"])
+        if "trusted_providers" in config:
+            TRUSTED_PROVIDERS = config["trusted_providers"]
+    except (json.JSONDecodeError, ValueError):
+        pass
 
 
 def _parse_api_keys(raw: str) -> list:
@@ -154,7 +170,117 @@ def calculate_model_score(model: dict) -> float:
         trust_score = 1 - (trust_index / len(TRUSTED_PROVIDERS))
         score += trust_score * RANKING_WEIGHTS["provider_trust"]
 
+    # Benchmark score (Artificial Analysis Intelligence Index)
+    benchmark_score = model.get("_benchmark_score", 0.0)
+    score += benchmark_score * RANKING_WEIGHTS["benchmarks"]
+
     return score
+
+
+def get_cached_benchmarks() -> Optional[dict]:
+    """Get cached benchmark data if still valid."""
+    if not BENCHMARK_CACHE_FILE.exists():
+        return None
+
+    try:
+        cache = json.loads(BENCHMARK_CACHE_FILE.read_text())
+        cached_at = datetime.fromisoformat(cache.get("cached_at", ""))
+        if datetime.now() - cached_at < timedelta(hours=BENCHMARK_CACHE_DURATION_HOURS):
+            return cache.get("benchmarks", {})
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    return None
+
+
+def save_benchmarks_cache(benchmarks: dict):
+    """Save benchmark data to cache file."""
+    BENCHMARK_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    cache = {
+        "cached_at": datetime.now().isoformat(),
+        "benchmarks": benchmarks
+    }
+    BENCHMARK_CACHE_FILE.write_text(json.dumps(cache, indent=2))
+
+
+def fetch_benchmarks() -> dict:
+    """Fetch benchmark scores from Artificial Analysis API."""
+    cached = get_cached_benchmarks()
+    if cached:
+        return cached
+
+    benchmarks = {}
+    api_key = os.environ.get("ARTIFICIAL_ANALYSIS_API_KEY")
+
+    if not api_key:
+        return benchmarks
+
+    headers = {
+        "x-api-key": api_key,
+        "Content-Type": "application/json"
+    }
+
+    try:
+        response = requests.get(ARTIFICIAL_ANALYSIS_API_URL, headers=headers, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+        models_data = data.get("data", [])
+
+        for bm_model in models_data:
+            slug = bm_model.get("slug", "").lower()
+            name = bm_model.get("name", "").lower()
+            evaluations = bm_model.get("evaluations", {})
+            
+            # Extract multiple benchmark scores
+            intel_score = evaluations.get("artificial_analysis_intelligence_index", 0)
+            coding_score = evaluations.get("artificial_analysis_coding_index", 0)
+            math_score = evaluations.get("artificial_analysis_math_index", 0)
+            
+            # Normalize all scores
+            intel_norm = min(float(intel_score) / 100.0, 1.0) if intel_score and float(intel_score) > 0 else 0.0
+            coding_norm = min(float(coding_score) / 100.0, 1.0) if coding_score and float(coding_score) > 0 else 0.0
+            math_norm = min(float(math_score) / 100.0, 1.0) if math_score and float(math_score) > 0 else 0.0
+            
+            # Weighted composite: 60% overall, 25% coding, 15% math
+            composite_score = (intel_norm * 0.60) + (coding_norm * 0.25) + (math_norm * 0.15)
+            
+            # Store with multiple lookup keys
+            benchmarks[slug] = composite_score
+            benchmarks[name] = composite_score
+
+        save_benchmarks_cache(benchmarks)
+    except requests.RequestException:
+        # Silently fail - benchmarks are optional enhancement
+        pass
+
+    return benchmarks
+
+
+def match_model_benchmark(model_id: str, benchmarks: dict) -> float:
+    """Match OpenRouter model ID to benchmark score using fuzzy matching."""
+    if not benchmarks:
+        return 0.0
+
+    model_id = model_id.lower()
+    model_id = model_id.replace(":free", "").replace("-instruct", "").replace("-chat", "")
+
+    # Direct match
+    if model_id in benchmarks:
+        return benchmarks[model_id]
+
+    # Partial match - find closest matching benchmark
+    model_parts = model_id.split("/")
+    if len(model_parts) > 1:
+        model_name = model_parts[1]
+        if model_name in benchmarks:
+            return benchmarks[model_name]
+
+        # Fuzzy partial matching
+        for key in benchmarks:
+            if model_name in key or key in model_name:
+                return benchmarks[key]
+
+    return 0.0
 
 
 def rank_free_models(models: list) -> list:
@@ -204,6 +330,13 @@ def get_free_models(api_key: str, force_refresh: bool = False) -> list:
 
     all_models = fetch_all_models(api_key)
     free_models = filter_free_models(all_models)
+    
+    # Fetch and attach benchmark scores
+    benchmarks = fetch_benchmarks()
+    for model in free_models:
+        bm_score = match_model_benchmark(model.get("id", ""), benchmarks)
+        model["_benchmark_score"] = bm_score
+    
     ranked_models = rank_free_models(free_models)
 
     save_models_cache(ranked_models)
@@ -412,21 +545,46 @@ def cmd_list(args):
     limit = args.limit if args.limit else 15
 
     print(f"\nTop {min(limit, len(models))} Free AI Models (ranked by quality):\n")
-    print(f"{'#':<3} {'Model ID':<50} {'Context':<12} {'Score':<8} {'Status'}")
-    print("-" * 90)
+    print(f"{'#':<3} {'Model ID':<42} {'Ctx':<6} {'Bench':<6} {'Cap':<5} {'Rec':<5} {'Trust':<6} {'Score':<8} {'Status'}")
+    print("-" * 130)
 
     for i, model in enumerate(models[:limit], 1):
         model_id = model.get("id", "unknown")
         context = model.get("context_length", 0)
-        score = model.get("_score", 0)
+        total_score = model.get("_score", 0)
+        bm_score = model.get("_benchmark_score", 0.0)
+        
+        # Calculate individual components
+        capabilities = model.get("supported_parameters", [])
+        cap_score = min(len(capabilities) / 10, 1.0)
+        
+        # Recency score
+        created = model.get("created", 0)
+        recency_score = 0.0
+        if created:
+            days_old = (time.time() - created) / 86400
+            recency_score = max(0, 1 - (days_old / 365))
+        
+        # Provider trust score
+        provider = model_id.split("/")[0] if "/" in model_id else ""
+        trust_score = 0.0
+        if provider in TRUSTED_PROVIDERS:
+            trust_index = TRUSTED_PROVIDERS.index(provider)
+            trust_score = 1 - (trust_index / len(TRUSTED_PROVIDERS))
 
         # Format context length
         if context >= 1_000_000:
-            context_str = f"{context // 1_000_000}M tokens"
+            context_str = f"{context // 1_000_000}M"
         elif context >= 1_000:
-            context_str = f"{context // 1_000}K tokens"
+            context_str = f"{context // 1_000}K"
         else:
-            context_str = f"{context} tokens"
+            context_str = f"{context}"
+
+        # Format scores
+        bm_display = f"{bm_score * 100:.0f}" if bm_score > 0 else "-"
+        cap_display = f"{cap_score * 10:.0f}"
+        rec_display = f"{recency_score * 10:.0f}"
+        trust_display = f"{trust_score * 10:.0f}"
 
         # Check status
         formatted = format_model_for_openclaw(model_id, with_provider_prefix=True)
@@ -439,7 +597,7 @@ def cmd_list(args):
         else:
             status = ""
 
-        print(f"{i:<3} {model_id:<50} {context_str:<12} {score:.3f}    {status}")
+        print(f"{i:<3} {model_id:<42} {context_str:<6} {bm_display:<6} {cap_display:<5} {rec_display:<5} {trust_display:<6} {total_score:.3f}    {status}")
 
     if len(models) > limit:
         print(f"\n... and {len(models) - limit} more. Use --limit to see more.")
