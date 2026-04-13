@@ -33,8 +33,8 @@ BENCHMARK_CACHE_DURATION_HOURS = 24
 
 # Default ranking criteria (higher is better)
 DEFAULT_RANKING_WEIGHTS = {
-    "context_length": 0.20,     # Prefer longer context
-    "benchmarks": 0.70,         # Prefer higher benchmark scores
+    "context_length": 0.30,     # Prefer longer context
+    "benchmarks": 0.60,         # Prefer higher benchmark scores
     "capabilities": 0.10,       # Prefer more capabilities
     "recency": 0.00,            # Prefer newer models
     "provider_trust": 0.00      # Prefer trusted providers
@@ -234,15 +234,13 @@ def fetch_benchmarks() -> dict:
             # Extract multiple benchmark scores
             intel_score = evaluations.get("artificial_analysis_intelligence_index", 0)
             coding_score = evaluations.get("artificial_analysis_coding_index", 0)
-            math_score = evaluations.get("artificial_analysis_math_index", 0)
             
-            # Normalize all scores
+            # Normalize scores
             intel_norm = min(float(intel_score) / 100.0, 1.0) if intel_score and float(intel_score) > 0 else 0.0
             coding_norm = min(float(coding_score) / 100.0, 1.0) if coding_score and float(coding_score) > 0 else 0.0
-            math_norm = min(float(math_score) / 100.0, 1.0) if math_score and float(math_score) > 0 else 0.0
             
-            # Weighted composite: 60% overall, 25% coding, 15% math
-            composite_score = (intel_norm * 0.60) + (coding_norm * 0.25) + (math_norm * 0.15)
+            # Weighted composite: 70% intelligence, 30% coding
+            composite_score = (intel_norm * 0.70) + (coding_norm * 0.30)
             
             # Store with multiple lookup keys
             benchmarks[slug] = composite_score
